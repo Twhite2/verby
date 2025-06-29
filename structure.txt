@@ -1,0 +1,119 @@
+# VerbyFlow - Project Structure
+
+## Project Overview
+VerbyFlow is a real-time multilingual voice communication platform built with Vue.js and FastAPI.
+
+## Directory Structure
+
+```
+verbyflow/
+├── frontend/                  # Vue.js application
+│   ├── public/                # Static assets
+│   │   ├── index.html         # HTML entry point
+│   │   ├── favicon.ico        # Favicon
+│   │   └── assets/            # Images and other static files
+│   ├── src/                   # Vue source code
+│   │   ├── main.js            # Vue app entry point
+│   │   ├── App.vue            # Root component
+│   │   ├── components/        # Reusable UI components
+│   │   │   ├── AudioControls.vue      # Voice recording controls
+│   │   │   ├── LanguageSelector.vue   # Language selection UI
+│   │   │   ├── CallInterface.vue      # Main call UI
+│   │   │   └── UserProfile.vue        # User settings
+│   │   ├── views/             # Page components
+│   │   │   ├── Home.vue       # Landing page
+│   │   │   └── Call.vue       # Call interface
+│   │   ├── services/          # JavaScript services
+│   │   │   ├── api.js         # FastAPI client
+│   │   │   ├── audio.js       # WebAudio API utils
+│   │   │   ├── websocket.js   # WebSocket connection
+│   │   │   └── storage.js     # Client storage
+│   │   ├── store/             # Vuex store
+│   │   │   ├── index.js       # Store setup
+│   │   │   └── modules/       # Store modules
+│   │   │       ├── call.js    # Call state
+│   │   │       ├── audio.js   # Audio state
+│   │   │       └── user.js    # User preferences
+│   │   ├── router/            # Vue Router
+│   │   │   └── index.js       # Router config
+│   │   └── assets/            # Compiled assets
+│   ├── package.json           # Frontend dependencies
+│   ├── vue.config.js          # Vue configuration
+│   ├── babel.config.js        # Babel configuration
+│   ├── .eslintrc.js           # ESLint configuration
+│   └── README.md              # Frontend documentation
+│
+├── backend/                   # FastAPI application
+│   ├── app/                   # Main application package
+│   │   ├── __init__.py        # Package initialization
+│   │   ├── main.py            # FastAPI entry point
+│   │   ├── routers/           # API endpoints
+│   │   │   ├── __init__.py    # Routers initialization
+│   │   │   ├── calls.py       # Call endpoints
+│   │   │   └── users.py       # User endpoints
+│   │   ├── models/            # Data models
+│   │   │   ├── __init__.py    # Models initialization
+│   │   │   └── schemas.py     # Pydantic schemas
+│   │   ├── services/          # Business logic
+│   │   │   ├── __init__.py    # Services initialization
+│   │   │   ├── audio.py       # Audio processing
+│   │   │   ├── stt.py         # Speech-to-text
+│   │   │   ├── translation.py # Translation
+│   │   │   └── tts.py         # Text-to-speech
+│   │   ├── websockets/        # WebSocket handlers
+│   │   │   ├── __init__.py    # WebSockets initialization
+│   │   │   └── connection.py  # Connection management
+│   │   └── config.py          # App configuration
+│   ├── requirements.txt       # Python dependencies
+│   ├── tests/                 # Backend tests
+│   │   ├── __init__.py        # Tests initialization
+│   │   ├── test_api.py        # API tests
+│   │   └── test_services.py   # Service tests
+│   ├── Dockerfile             # Backend Docker configuration
+│   └── README.md              # Backend documentation
+│
+├── docker-compose.yml         # Docker services configuration
+├── .gitignore                 # Git ignore file
+├── .env.example               # Environment variables example
+└── README.md                  # Project documentation
+```
+
+## Key Technologies
+
+### Frontend
+- Vue.js 3 with Composition API
+- Vuex 4 for state management
+- Vue Router for navigation
+- WebRTC / WebAudio API for audio handling
+- WebSockets for real-time communication
+
+### Backend
+- Python 3.9+
+- FastAPI framework
+- WebSockets for real-time data
+- Whisper (OpenAI) or similar for STT
+- Argos Translate or cloud APIs for translation
+- Coqui TTS or similar for speech synthesis
+- Uvicorn as ASGI server
+
+## Development Workflow
+1. Set up local development environment
+2. Start backend API server
+3. Start frontend development server
+4. Work on features independently or full-stack
+5. Test with real-time audio communication
+
+## Deployment Options
+- Docker containers for easy deployment
+- Cloud hosting (AWS, GCP, Azure, etc.)
+- Separate frontend/backend deployments possible
+- Environment variables for configuration
+
+## API Endpoints
+
+### REST
+- `/api/users` - User management
+- `/api/languages` - Available languages
+
+### WebSocket
+- `/ws/call/{call_id}` - Main call communication

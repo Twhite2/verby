@@ -1,0 +1,5 @@
+#!/home/jarvis/Documents/personalBuild/callverby/verbyflow/backend/verby/bin/python3
+
+from argostranslate import argospm
+
+argospm.main()

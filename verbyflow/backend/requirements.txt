@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+websockets
+pydantic
+python-dotenv
+httpx
+argostranslate
+pyttsx3
+SpeechRecognition
+numpy
+soundfile
+python-multipart
+openai
+pytest
