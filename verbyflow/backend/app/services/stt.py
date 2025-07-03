@@ -3,14 +3,17 @@ import os
 import time
 import tempfile
 import speech_recognition as sr
-from typing import Optional
+from typing import Dict, Optional, Tuple, List
 import io
+import uuid
 import base64
 import soundfile as sf
 import numpy as np
+from datetime import datetime, timedelta
 from pydub import AudioSegment
 from app.config import settings
 from pydub.utils import mediainfo
+from queue import Queue
 
 # Try to import optional dependencies
 try:
@@ -22,37 +25,186 @@ try:
 except ImportError:
     WHISPER_API_AVAILABLE = False
 
+# Try to import whisper for local processing
+WHISPER_LOCAL_AVAILABLE = False
+try:
+    import torch
+    try:
+        # First try to import the correct openai-whisper package
+        import whisper
+        # Check if it's the right whisper package by trying to access a known attribute
+        if hasattr(whisper, 'load_model'):
+            WHISPER_LOCAL_AVAILABLE = True
+            print("OpenAI Whisper local model is available")
+    except (ImportError, TypeError) as e:
+        print(f"Error importing whisper: {e}")
+        print("The installed whisper package might not be OpenAI's whisper. Try 'pip install openai-whisper' instead.")
+        WHISPER_LOCAL_AVAILABLE = False
+except ImportError:
+    print("PyTorch not available, local whisper speech recognition disabled")
+    WHISPER_LOCAL_AVAILABLE = False
+
 # Initialize speech recognizer
 recognizer = sr.Recognizer()
 
 
-async def transcribe_audio(audio_data: bytes, language: str = "en") -> Optional[str]:
+class WhisperLocalModel:
+    """Class for handling speech recognition using local Whisper model"""
+    
+    def __init__(self, model_name="base"):
+        if not WHISPER_LOCAL_AVAILABLE:
+            raise ImportError("Whisper is not available. Install it with 'pip install whisper'")
+            
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        print(f"Loading Whisper model {model_name} on {self.device}")
+        self.audio_model = whisper.load_model(model_name, device=self.device)
+        self.decoding_options = {"task": "translate"}
+        
+        # The last time a recording was processed
+        self.phrase_time = datetime.utcnow()
+        # Current raw audio bytes
+        self.last_sample = bytes()
+        
+    def transcribe(self, audio_data, sample_rate=16000, sample_width=2):
+        """Transcribe audio using local Whisper model"""
+        try:
+            # Convert audio data to format Whisper can use
+            audio_obj = sr.AudioData(audio_data, sample_rate, sample_width)
+            wav_data = io.BytesIO(audio_obj.get_wav_data())
+            with sf.SoundFile(wav_data, mode='r') as sound_file:
+                audio = sound_file.read(dtype='float32')
+                
+                # Process with Whisper
+                start_time = time.time()
+                result = self.audio_model.transcribe(
+                    audio, 
+                    fp16=torch.cuda.is_available(), 
+                    **self.decoding_options
+                )
+                end_time = time.time()
+                
+                text = result['text'].strip()
+                print(f"Whisper local transcription: '{text}' (took {end_time - start_time:.2f}s)")
+                return text
+        except Exception as e:
+            print(f"Error during Whisper local transcription: {e}")
+            return None
+
+# Try to initialize the Whisper model if available
+whisper_local = None
+if WHISPER_LOCAL_AVAILABLE:
+    try:
+        whisper_local = WhisperLocalModel()
+    except Exception as e:
+        print(f"Failed to initialize Whisper local model: {e}")
+        print(f"This is likely due to missing dependencies or incorrect whisper package.")
+        print(f"Please install the correct package with: pip install openai-whisper")
+        WHISPER_LOCAL_AVAILABLE = False
+
+# Dictionary to store conversation sessions
+# Each session has: last_timestamp, audio_buffer, transcript_history
+conversation_sessions = {}
+
+async def transcribe_audio(audio_data: bytes, language: str = "en", session_id: str = None) -> Dict:
     """
-    Transcribe audio data to text.
+    Transcribe audio data to text, supporting continuous conversation.
     
     Args:
         audio_data: Raw audio bytes
         language: ISO language code
+        session_id: Optional session ID for continuous conversation tracking
     
     Returns:
-        Transcribed text or None if no speech detected
+        Dictionary with transcription results and session info
     """
-    # Check if OpenAI API key is available
-    openai_available = WHISPER_API_AVAILABLE and settings.OPENAI_API_KEY
+    # Generate a new session ID if none provided
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        print(f"Created new conversation session: {session_id}")
     
-    if openai_available:
+    # Initialize or update session
+    now = datetime.utcnow()
+    if session_id not in conversation_sessions:
+        conversation_sessions[session_id] = {
+            'last_timestamp': now,
+            'audio_buffer': audio_data,
+            'transcript_history': [],
+            'is_final': False
+        }
+    else:
+        # Check if we need to reset the session due to timeout
+        session = conversation_sessions[session_id]
+        if now - session['last_timestamp'] > timedelta(seconds=10):  # 10 second timeout
+            print(f"Session {session_id} timed out, resetting buffer")
+            session['audio_buffer'] = audio_data
+            session['is_final'] = True  # Mark previous conversation as complete
+        else:
+            # Append new audio data
+            session['audio_buffer'] += audio_data
+        
+        session['last_timestamp'] = now
+    
+    # Clean up old sessions (older than 5 minutes)
+    _cleanup_old_sessions()
+    
+    # Get the current session
+    session = conversation_sessions[session_id]
+    
+    # Choose transcription method
+    if WHISPER_API_AVAILABLE and settings.OPENAI_API_KEY:
         print("Using OpenAI Whisper API for transcription")
         transcription_func = _transcribe_with_whisper_api
+    elif WHISPER_LOCAL_AVAILABLE and whisper_local:
+        print("Using local Whisper model for transcription")
+        transcription_text = await asyncio.to_thread(whisper_local.transcribe, session['audio_buffer'])
+        result = {'text': transcription_text, 'session_id': session_id}
+        return result
     else:
-        print("OpenAI API key not available, falling back to local speech recognition")
+        print("Falling back to local speech recognition")
         transcription_func = _transcribe_with_sr
     
     # Run the CPU-intensive task in a separate thread pool
-    return await asyncio.to_thread(transcription_func, audio_data, language)
+    transcription_text = await asyncio.to_thread(
+        transcription_func, 
+        session['audio_buffer'], 
+        language
+    )
+    
+    if transcription_text:
+        # Update session with new transcription
+        if session.get('is_final', False):
+            # Start fresh with new audio
+            session['transcript_history'].append(transcription_text)
+            session['is_final'] = False
+        else:
+            # Replace the last transcript with the updated one that includes new audio
+            session['transcript_history'] = [transcription_text]
+    
+    # Return the result with session info
+    result = {
+        'text': transcription_text,
+        'session_id': session_id,
+        'is_final': session.get('is_final', False),
+        'history': session.get('transcript_history', [])
+    }
+    return result
+
+
+def _cleanup_old_sessions():
+    """Remove conversation sessions that are older than 5 minutes"""
+    now = datetime.utcnow()
+    expired_sessions = [
+        session_id for session_id, session in conversation_sessions.items()
+        if now - session['last_timestamp'] > timedelta(minutes=5)
+    ]
+    
+    for session_id in expired_sessions:
+        print(f"Removing expired session {session_id}")
+        del conversation_sessions[session_id]
 
 
 def _transcribe_with_whisper_api(audio_data: bytes, language: str) -> Optional[str]:
-    """Transcribe audio data using OpenAI's Whisper API with improved handling for browser audio."""
+    """Transcribe audio data using OpenAI's Whisper API with simplified direct approach."""
     # Check if API key is configured
     if not settings.OPENAI_API_KEY:
         print("WARNING: OPENAI_API_KEY is not set. Whisper API transcription will not work.")
@@ -61,6 +213,7 @@ def _transcribe_with_whisper_api(audio_data: bytes, language: str) -> Optional[s
         
     try:
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        print("Successfully initialized OpenAI client")
     except Exception as e:
         print(f"Error initializing OpenAI client: {str(e)}")
         return None
@@ -68,435 +221,47 @@ def _transcribe_with_whisper_api(audio_data: bytes, language: str) -> Optional[s
     # Performance tracking
     start_time = time.time()
     
-    # Import buffer and file conversion utilities from OpenAI
+    # Create a temporary file with .wav extension for OpenAI API
+    temp_file = None
+    temp_file_name = None
     try:
-        from openai.types.audio.transcription import Transcription
-        from openai.uploaders import File as OpenAIFile
-        from openai.uploads import toFile
-        use_tofile = True
-        print("Using OpenAI's toFile utility for improved file handling")
-    except ImportError:
-        use_tofile = False
-        print("OpenAI toFile utility not available, using standard file handling")
-    
-    # Create a temporary directory to store files
-    temp_dir = tempfile.mkdtemp()
-    audio_path = os.path.join(temp_dir, "original_audio")
-    mp3_path = os.path.join(temp_dir, "audio.mp3")
-    
-    try:
-        print(f"Received audio data size: {len(audio_data)} bytes")
-
-        # Write audio data to file for processing
-        with open(audio_path, 'wb') as f:
-            f.write(audio_data)
-
-        # Detect audio format from header bytes
-        format_hint = "unknown"
-        if len(audio_data) > 12:
-            header = audio_data[:12]
-            if audio_data[:4] == b"RIFF" and audio_data[8:12] == b"WAVE":
-                format_hint = "wav"
-            elif audio_data[:4] == b"OggS":
-                format_hint = "ogg"
-            elif audio_data[:4] == b"\x1a\x45\xdf\xa3":
-                format_hint = "webm"
-            elif b'ID3' in header:
-                format_hint = "mp3"
+        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_file_name = temp_file.name
+        temp_file.write(audio_data)
+        temp_file.close()
         
-        print(f"Audio format detection: {format_hint}")
-        
-        # Debug the first bytes of the audio data
-        import binascii
-        print(f"First 32 bytes: {binascii.hexlify(audio_data[:32]).decode()}")
-        
-        # Calculate audio variability to help detect PCM data - useful for browser audio
-        if len(audio_data) > 100:
-            # Check byte-to-byte differences which are typically higher in PCM audio
-            diffs = [abs(audio_data[i] - audio_data[i+1]) for i in range(min(1000, len(audio_data)-1))]
-            avg_diff = sum(diffs) / len(diffs)
-            print(f"Audio byte variability: {avg_diff:.2f} (higher values suggest PCM data)")
-            has_pcm_characteristics = avg_diff > 5  # PCM audio typically has higher variability
-        else:
-            has_pcm_characteristics = False 
-        # Method 1: Try to extract raw PCM data directly and create WAV file (Most successful with browser audio)
-        if has_pcm_characteristics:
-            print("Attempt 1: Extracting PCM data and creating WAV file (prioritized due to audio characteristics)")
-            try:
-                # Create a WAV file with standard parameters for voice
-                wav_path = os.path.join(temp_dir, "audio.wav")
-                
-                import struct
-                
-                # Try various methods to handle browser WebM audio with corrupted headers
-                
-                # Method 1: Try converting with FFmpeg first (preferred approach)
-                try:
-                    print("Trying FFmpeg direct WebM to WAV conversion first")
-                    wav_file_path = os.path.join(temp_dir, "direct_ffmpeg.wav")
-                    
-                    subprocess.check_output([
-                        'ffmpeg', '-y',
-                        '-i', audio_path,
-                        '-acodec', 'pcm_s16le',
-                        '-ar', '16000',
-                        '-ac', '1',
-                        wav_file_path
-                    ], stderr=subprocess.PIPE)
-                    
-                    # Try whisper API with FFmpeg converted audio
-                    with open(wav_file_path, 'rb') as audio_file:
-                        response = client.audio.transcriptions.create(
-                            file=audio_file,
-                            model="whisper-1",
-                            language=language
-                        )
-                        result_text = response.text
-                        
-                        # Check for suspicious single-word results like "You"
-                        # If we have a reasonable amount of audio, we should get more than a single word
-                        if len(audio_data) > 10000 and len(result_text.split()) <= 1 and result_text.lower() == "you":
-                            print(f"⚠️ Rejected suspicious transcription: '{result_text}' - likely incorrect due to audio conversion issue")
-                        else:
-                            print(f"✓ TRANSCRIPTION SUCCESS (FFmpeg-WAV): '{result_text}'")
-                            return result_text
-                except Exception as e:
-                    print(f"FFmpeg conversion failed: {str(e)}")
-                
-                # Method 2: Try various offsets to skip malformed headers as fallback
-                print("Trying PCM extraction with various offsets")
-                # Using different offset to avoid the exact same processing that led to incorrect "You" transcription
-                for offset in [48, 96, 128, 256, 0]:
-                    if offset >= len(audio_data):
-                        continue
-                        
-                    # Extract PCM data, skip potential header
-                    pcm_data = audio_data[offset:]
-                    
-                    # Create WAV with proper header
-                    wav_file_path = os.path.join(temp_dir, f"pcm_extract_{offset}.wav")
-                    
-                    # For WebM from browsers, we generally want 16kHz, 16-bit mono
-                    sample_rate = 16000
-                    channels = 1
-                    bits_per_sample = 16
-                    bytes_per_sample = bits_per_sample // 8
-                    
-                    # Generate WAV header
-                    header = bytearray()
-                    
-                    # RIFF chunk
-                    header.extend(b'RIFF')
-                    header.extend(struct.pack('<I', 36 + len(pcm_data)))
-                    header.extend(b'WAVE')
-                    
-                    # fmt subchunk
-                    header.extend(b'fmt ')
-                    header.extend(struct.pack('<I', 16))
-                    header.extend(struct.pack('<H', 1))  # PCM format
-                    header.extend(struct.pack('<H', channels))
-                    header.extend(struct.pack('<I', sample_rate))
-                    header.extend(struct.pack('<I', sample_rate * channels * bytes_per_sample))
-                    header.extend(struct.pack('<H', channels * bytes_per_sample))
-                    header.extend(struct.pack('<H', bits_per_sample))
-                    
-                    # data subchunk
-                    header.extend(b'data')
-                    header.extend(struct.pack('<I', len(pcm_data)))
-                    
-                    # Write WAV file
-                    with open(wav_file_path, 'wb') as f:
-                        f.write(header + pcm_data)
-                    
-                    # Try whisper API with this PCM extraction
-                    try:
-                        with open(wav_file_path, 'rb') as audio_file:
-                            response = client.audio.transcriptions.create(
-                                file=audio_file,
-                                model="whisper-1",
-                                language=language
-                            )
-                            result_text = response.text
-                            
-                            # Reject suspicious single-word transcriptions for large audio chunks
-                            if len(audio_data) > 10000 and len(result_text.split()) <= 1 and result_text.lower() == "you":
-                                print(f"⚠️ Skipping suspicious transcription at offset {offset}: '{result_text}' - likely incorrect")
-                                continue
-                            
-                            print(f"✓ TRANSCRIPTION SUCCESS (PCM-WAV offset={offset}): '{result_text}'")
-                            return result_text
-                    except Exception as e:
-                        print(f"Whisper API transcription failed for offset {offset}: {str(e)}")
-            except Exception as e:
-                print(f"Error during PCM extraction: {str(e)}")
-        
-        # Method 2: Use OpenAI's toFile utility (reliable for standard audio)
-        if use_tofile:
-            try:
-                print("Attempt 2: Using OpenAI's toFile utility for direct conversion")
-                # Create a proper file object using OpenAI's utility
-                file_obj = toFile(audio_data, "audio.mp3")
+        print(f"Created temporary file: {temp_file_name} with {len(audio_data)} bytes")
+        # Direct API call using the temporary file
+        try:
+            print(f"Sending audio to OpenAI Whisper API for transcription...")
+            
+            with open(temp_file_name, "rb") as audio_file:
+                # Simple direct transcription call with prompt for better context handling
                 response = client.audio.transcriptions.create(
-                    file=file_obj,
+                    file=audio_file,
                     model="whisper-1",
-                    language=language
+                    language=language,
+                    response_format="text"
                 )
-                print(f"✓ TRANSCRIPTION SUCCESS (toFile): '{response.text}'")
-                return response.text
-            except Exception as e:
-                print(f"toFile approach failed: {str(e)}")
-        
-        # Method 3: Try direct upload with proper MIME type
-        direct_error = None
-        try:
-            print("Attempt 3: Direct upload with explicit MIME type")
-            # Read back and upload
-            with open(audio_path, 'rb') as f:
-                response = client.audio.transcriptions.create(
-                    file=f,
-                    model="whisper-1",
-                    language=language
-                )
-                print(f"✓ TRANSCRIPTION SUCCESS (direct file): '{response.text}'")
-                return response.text
-        except Exception as e:
-            direct_error = str(e)
-            print(f"Direct file upload failed: {direct_error}")
-        
-        # Method 3: Try converting with pydub to MP3
-        print("Attempt 3: Converting audio with pydub to MP3 format")
-        pydub_error = None
-        try:
-            print("Attempt 4: Converting audio with pydub to MP3 format")
-            from pydub import AudioSegment
-            
-            # Try a variety of loading methods
-            loaded = False
-            
-            # 1. First, try loading directly as WebM since that's what browser MediaRecorder typically sends
-            if not loaded:
-                try:
-                    print("Trying to load as WebM (browser default)")
-                    audio = AudioSegment.from_file(audio_path, format="webm")
-                    loaded = True
-                    print("Successfully loaded as WebM")
-                except Exception as e:
-                    print(f"Failed to load as WebM: {str(e)}")
-            
-            # 2. Then try loading as raw PCM with optimal speech parameters
-            if not loaded:
-                # These are the settings optimized for speech
-                try:
-                    print("Trying to load as raw PCM with speech-optimized settings (16kHz, mono, 16-bit)")
-                    audio = AudioSegment.from_raw(audio_path, sample_width=2, frame_rate=16000, channels=1)
-                    loaded = True
-                    print("Successfully loaded as raw PCM with speech settings")
-                except Exception as e:
-                    print(f"Failed with speech-optimized settings: {str(e)}")
-            
-            # 3. Try other common raw PCM configurations
-            if not loaded:
-                for sample_rate in [48000, 44100, 22050]:
-                    for channels in [1, 2]:
-                        try:
-                            print(f"Loading audio as raw PCM: {sample_rate}Hz, {channels} channels")
-                            audio = AudioSegment.from_raw(audio_path, sample_width=2, frame_rate=sample_rate, channels=channels)
-                            loaded = True
-                            print(f"Successfully loaded as raw PCM ({sample_rate}Hz, {channels} channels)")
-                            break
-                        except Exception as e:
-                            print(f"Failed with {sample_rate}Hz, {channels} channels: {str(e)}")
-                    if loaded:
-                        break
-
-            # 4. Try other common audio formats
-            if not loaded:
-                for format_name in ['wav', 'mp3', 'ogg']:
-                    try:
-                        print(f"Trying to load as {format_name}")
-                        if format_name == 'wav':
-                            audio = AudioSegment.from_wav(audio_path)
-                        elif format_name == 'mp3':
-                            audio = AudioSegment.from_mp3(audio_path)
-                        elif format_name == 'ogg':
-                            audio = AudioSegment.from_ogg(audio_path)
-                        loaded = True
-                        print(f"Successfully loaded as {format_name}")
-                        break
-                    except Exception as e:
-                        print(f"Failed to load as {format_name}: {str(e)}")
-            
-            # 5. Last resort - try loading as raw data
-            if not loaded:
-                print("Trying to load as raw bytes (last resort)")
-                try:
-                    audio = AudioSegment(data=audio_data)
-                    loaded = True
-                    print("Successfully loaded as raw bytes")
-                except Exception as e:
-                    print(f"Failed to load as raw bytes: {str(e)}")
-
-            # If loading succeeded, export to MP3 optimized for speech
-            if loaded:
-                # Export as MP3 with speech-optimized settings
-                # - Mono (1 channel) - speech doesn't need stereo
-                # - 16kHz - sufficient for speech recognition
-                # - 32kbps - good quality for speech while keeping file small
-                audio = audio.set_channels(1).set_frame_rate(16000)
-                audio.export(mp3_path, format="mp3", bitrate="32k", 
-                          parameters=["-ar", "16000", "-ac", "1", "-q:a", "0"])
-                print(f"Exported optimized MP3 to {mp3_path}")
+                # Extract the result
+                transcript = response
+                end_time = time.time()
+                print(f"Whisper API transcription successful in {end_time - start_time:.2f}s")
+                print(f"Transcript: '{transcript}'")
                 
-                # Transcribe with MP3
-                with open(mp3_path, 'rb') as f:
-                    response = client.audio.transcriptions.create(
-                        file=f,
-                        model="whisper-1",
-                        language=language
-                    )
-                print(f"✓ TRANSCRIPTION SUCCESS (pydub MP3): '{response.text}'")
-                return response.text
-            else:
-                print("All pydub loading methods failed")
-        except Exception as e:
-            print(f"Error during pydub conversion: {str(e)}")
-                
-        # Method 5: Try manual raw PCM data extraction as last resort
-        print("Attempt 5: Trying manual PCM data extraction as last resort")
-        pcm_error = None
-        try:
-            # Create a WAV file with standard parameters for voice
-            wav_path = os.path.join(temp_dir, "audio.wav")
-            try:
-                import subprocess
-                import struct
-                
-                # Generate raw PCM headers manually
-                # Simple WAV header for 16-bit PCM, 16kHz, Mono
-                def create_wav_file(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
-                    byte_rate = sample_rate * channels * bits_per_sample // 8
-                    block_align = channels * bits_per_sample // 8
-                    
-                    # WAV header
-                    header = bytearray()
-                    header.extend(b'RIFF')  # ChunkID
-                    header.extend(struct.pack('<I', 36 + len(pcm_data)))  # ChunkSize
-                    header.extend(b'WAVE')  # Format
-                    
-                    # fmt subchunk
-                    header.extend(b'fmt ')  # Subchunk1ID
-                    header.extend(struct.pack('<I', 16))  # Subchunk1Size (16 for PCM)
-                    header.extend(struct.pack('<H', 1))  # AudioFormat (1 for PCM)
-                    header.extend(struct.pack('<H', channels))  # NumChannels
-                    header.extend(struct.pack('<I', sample_rate))  # SampleRate
-                    header.extend(struct.pack('<I', byte_rate))  # ByteRate
-                    header.extend(struct.pack('<H', block_align))  # BlockAlign
-                    header.extend(struct.pack('<H', bits_per_sample))  # BitsPerSample
-                    
-                    # data subchunk
-                    header.extend(b'data')  # Subchunk2ID
-                    header.extend(struct.pack('<I', len(pcm_data)))  # Subchunk2Size
-                    
-                    # Combine header with PCM data
-                    wav_data = header + pcm_data
-                    return wav_data
-                
-                # Try to identify if we have raw PCM data or need to extract it
-                # Extract PCM - even from invalid WebM by trying to skip headers
-                # This is a last-resort approach for malformed browser audio
-                pcm_data = None
-                
-                # If the file is very small, it might be just PCM data
-                if len(audio_data) > 44:  # Minimum size for WAV header + some data
-                    # Check for possible WebM header and try to skip it
-                    # WebM typically has a header, followed by audio data
-                    # For malformed WebM, try various offsets
-                    for offset in [64, 128, 256, 512]:  # Common header sizes
-                        if offset < len(audio_data):
-                            # Try this chunk of data as PCM
-                            pcm_chunk = audio_data[offset:]
-                            wav_data = create_wav_file(pcm_chunk)
-                            
-                            # Write WAV file
-                            with open(wav_path, 'wb') as f:
-                                f.write(wav_data)
-                            
-                            # Try to use the WAV file with Whisper
-                            try:
-                                with open(wav_path, 'rb') as audio_file:
-                                    response = client.audio.transcriptions.create(
-                                        file=audio_file,
-                                        model="whisper-1",
-                                        language=language
-                                    )
-                                    print(f"✓ TRANSCRIPTION SUCCESS (PCM-WAV offset={offset}): '{response.text}'")
-                                    return response.text
-                            except Exception as wav_err:
-                                print(f"WAV transcription failed with offset {offset}: {str(wav_err)}")
-                    
-            except Exception as pcm_err:
-                pcm_error = str(pcm_err)
-                print(f"PCM extraction failed: {pcm_error}")
-                
-            # Last resort - try ffmpeg with different input format assumptions
-            for fmt in ['webm', 's16le', 'f32le', 'u8', 'alaw', 'mulaw']:
-                try:
-                    print(f"Trying ffmpeg with input format: {fmt}")
-                    mp3_fallback = os.path.join(temp_dir, f"fallback_{fmt}.mp3")
-                    
-                    # Force input format and attempt conversion
-                    subprocess.check_output([
-                        'ffmpeg', '-y', '-f', fmt, '-i', audio_path,
-                        '-ac', '1', '-ar', '16000', '-codec:a', 'libmp3lame', 
-                        '-qscale:a', '2', mp3_fallback
-                    ], stderr=subprocess.STDOUT)
-                    
-                    with open(mp3_fallback, "rb") as audio_file:
-                        response = client.audio.transcriptions.create(
-                            file=audio_file,
-                            model="whisper-1",
-                            language=language
-                        )
-                        print(f"✓ TRANSCRIPTION SUCCESS (ffmpeg {fmt}->MP3): '{response.text}'")
-                        return response.text
-                except Exception as fmt_error:
-                    print(f"FFmpeg with {fmt} failed: {str(fmt_error)}")
+                return transcript.strip() if transcript else None
                 
         except Exception as e:
-            print(f"PCM/WAV extraction failed: {str(e)}")
-        
-        # All attempts failed - provide detailed diagnostics
-        print("All transcription attempts failed")
-        
-        # Output binary analysis of the audio data to help debug
-        if len(audio_data) > 64:
-            import binascii
-            print(f"First 64 bytes: {binascii.hexlify(audio_data[:64]).decode()}")
-            print(f"Last 64 bytes: {binascii.hexlify(audio_data[-64:]).decode()}")
-            
-            # Try to detect if this might be raw PCM data
-            variation = sum(abs(audio_data[i] - audio_data[i+1]) for i in range(min(100, len(audio_data)-1)))
-            avg_variation = variation / min(100, len(audio_data)-1)
-            print(f"Average byte variation: {avg_variation:.2f} (high values suggest PCM data)")
-        
-        # Provide hints for frontend improvement
-        print("SUGGESTION: Consider modifying frontend audio capture:")
-        print("1. Use higher quality MediaRecorder settings (audio/wav or audio/webm;codecs=pcm)")
-        print("2. Ensure complete audio chunks are being sent")
-        print("3. Consider client-side conversion to WAV before sending")
-        
-        raise Exception("Failed to transcribe audio after multiple attempts")
-    except Exception as e:
-        print(f"Error in Whisper API transcription: {e}")
-        return None
+            print(f"Error during Whisper API transcription: {str(e)}")
+            return None
     finally:
-        # Clean up temporary directory and all files inside it
+        # Clean up temporary file
         try:
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception as cleanup_error:
-            print(f"Error cleaning up temp directory: {cleanup_error}")
-            pass
+            if temp_file_name and os.path.exists(temp_file_name):
+                os.unlink(temp_file_name)
+                print(f"Removed temporary file: {temp_file_name}")
+        except Exception as e:
+            print(f"Error cleaning up temporary file: {str(e)}")
 
 
 def _transcribe_with_sr(audio_data: bytes, language: str) -> Optional[str]:

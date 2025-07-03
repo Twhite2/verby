@@ -1,7 +1,0 @@
-#!/home/jarvis/Documents/personalBuild/callverby/verbyflow/backend/verby/bin/python3
-
-from argostranslate import cli
-
-cli.main()
-
-

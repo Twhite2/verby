@@ -1,35 +1,51 @@
 import asyncio
 from typing import Optional
 import httpx
+import logging
 from app.config import settings
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+# Flag to track if translation is available
+ARGOS_AVAILABLE = False
 
 # Try to import optional dependencies
 try:
     import argostranslate.package
     import argostranslate.translate
-    ARGOS_AVAILABLE = True
-except ImportError:
-    ARGOS_AVAILABLE = False
-
-# Initialize Argos Translate
-if ARGOS_AVAILABLE:
-    argostranslate.package.update_package_index()
-    available_packages = argostranslate.package.get_available_packages()
     
-    # Install language packages if needed
-    for from_lang, from_name in settings.AVAILABLE_LANGUAGES.items():
-        for to_lang, to_name in settings.AVAILABLE_LANGUAGES.items():
-            if from_lang != to_lang:
-                package = next(
-                    (p for p in available_packages if p.from_code == from_lang and p.to_code == to_lang),
-                    None
-                )
-                if package and not package.is_installed():
-                    try:
-                        print(f"Installing translation package: {from_lang} -> {to_lang}")
-                        argostranslate.package.install_from_path(package.download())
-                    except Exception as e:
-                        print(f"Error installing translation package {from_lang}->{to_lang}: {e}")
+    # Check if we can initialize Argos Translate
+    try:
+        argostranslate.package.update_package_index()
+        available_packages = argostranslate.package.get_available_packages()
+        ARGOS_AVAILABLE = True
+        
+        # Try to install language packages if needed but don't block startup
+        try:
+            for from_lang, from_name in settings.AVAILABLE_LANGUAGES.items():
+                for to_lang, to_name in settings.AVAILABLE_LANGUAGES.items():
+                    if from_lang != to_lang:
+                        package = next(
+                            (p for p in available_packages if p.from_code == from_lang and p.to_code == to_lang),
+                            None
+                        )
+                        # Skip the is_installed check that's causing problems
+                        if package:
+                            try:
+                                print(f"Installing translation package: {from_lang} -> {to_lang}")
+                                argostranslate.package.install_from_path(package.download())
+                            except Exception as e:
+                                print(f"Error installing translation package {from_lang}->{to_lang}: {e}")
+        except Exception as e:
+            logger.warning(f"Error setting up translation packages: {e}")
+            # We still mark Argos as available if the imports worked
+    except Exception as e:
+        logger.warning(f"Error initializing argostranslate: {e}")
+        ARGOS_AVAILABLE = False
+except ImportError as e:
+    logger.warning(f"argostranslate not available: {e}")
+    ARGOS_AVAILABLE = False
 
 
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:

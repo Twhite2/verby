@@ -1,6 +1,6 @@
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Optional
 import json
 import asyncio
 
@@ -17,6 +17,8 @@ class ConnectionManager:
         self.active_connections: Dict[str, Dict[str, WebSocket]] = {}
         # Map of call_id -> map of user_id -> language preference
         self.language_preferences: Dict[str, Dict[str, str]] = {}
+        # Map of user_id -> transcription session ID for continuous conversation
+        self.transcription_sessions: Dict[str, str] = {}
         
     async def connect(self, websocket: WebSocket, call_id: str, user_id: str):
         """Connect a user to a call."""
@@ -70,6 +72,11 @@ class ConnectionManager:
                 del self.language_preferences[call_id][user_id]
                 if not self.language_preferences[call_id]:
                     del self.language_preferences[call_id]
+                    
+            # Clean up transcription session
+            if user_id in self.transcription_sessions:
+                del self.transcription_sessions[user_id]
+                print(f"Removed transcription session for user {user_id}")
     
     async def broadcast_text(self, message: str, call_id: str):
         """Broadcast a text message to all participants in a call."""
@@ -129,7 +136,7 @@ class ConnectionManager:
     async def process_audio(self, audio_data: bytes, call_id: str, sender_id: str):
         """
         Process incoming audio:
-        1. Transcribe speech to text
+        1. Transcribe speech to text using continuous session-based transcription
         2. Translate the text to target languages
         3. Synthesize speech in target languages
         4. Send synthesized speech to recipients
@@ -160,21 +167,37 @@ class ConnectionManager:
                     continue
                 active_recipients[user_id] = conn
                 
-            # Transcribe audio
+            # Transcribe audio using session-based continuous transcription
             print(f"Attempting to transcribe {len(audio_data)} bytes of audio data...")
-            text = await transcribe_audio(audio_data, sender_language)
+            
+            # Get existing session ID for this user or None for a new session
+            session_id = self.transcription_sessions.get(sender_id)
+            
+            # Call transcribe_audio with session_id
+            result = await transcribe_audio(audio_data, sender_language, session_id)
+            
+            # Store the session ID for future use
+            if result and 'session_id' in result:
+                self.transcription_sessions[sender_id] = result['session_id']
+                print(f"Using transcription session {result['session_id']} for user {sender_id}")
+            
+            # Extract text from result dictionary
+            text = result.get('text') if result else None
+            is_final = result.get('is_final', False) if result else False
+            
             if not text:
                 print("No speech detected or transcription failed")
                 return  # No speech detected
                 
-            print(f"Transcription successful: '{text}'")
+            print(f"Transcription successful: '{text}' (is_final: {is_final})")
                 
             # Send transcription to sender for confirmation (if still connected)
             if sender_id in active_recipients:
                 try:
                     await active_recipients[sender_id].send_text(json.dumps({
                         "type": "transcription",
-                        "text": text
+                        "text": text,
+                        "is_final": is_final
                     }))
                     print(f"Sent transcription to sender {sender_id}")
                 except WebSocketDisconnect:
@@ -235,7 +258,7 @@ class ConnectionManager:
                     except Exception as e:
                         print(f"Speech synthesis error: {str(e)}")
                         continue
-                    
+                        
                     # Also send the text translation if recipient is still connected
                     if call_id in self.active_connections and recipient_id in self.active_connections[call_id]:
                         try:
@@ -245,7 +268,8 @@ class ConnectionManager:
                                 "original_text": text,
                                 "original_language": sender_language,
                                 "translated_text": translated_text,
-                                "target_language": target_language
+                                "target_language": target_language,
+                                "is_final": is_final  # Pass through final flag
                             }))
                             print(f"Sent translation text to recipient {recipient_id}")
                         except WebSocketDisconnect:
