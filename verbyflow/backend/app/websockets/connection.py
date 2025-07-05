@@ -3,6 +3,7 @@ from starlette.websockets import WebSocketState
 from typing import Dict, List, Set, Any, Optional
 import json
 import asyncio
+import traceback
 
 from app.services.stt import transcribe_audio
 from app.services.translation import translate_text
@@ -150,7 +151,15 @@ class ConnectionManager:
             print(f"Sender {sender_id} no longer connected, skipping audio processing")
             return
             
-        print(f"Processing audio from user {sender_id}, size: {len(audio_data)} bytes")
+        print(f"PROCESSING AUDIO: user={sender_id}, size={len(audio_data)} bytes, format=WebM/Opus")
+        
+        # Additional verification of audio data
+        if len(audio_data) < 100:
+            print(f"WARNING: Audio data too small ({len(audio_data)} bytes), may not be processable")
+        
+        # Debug first few bytes to verify it's a valid WebM container
+        header_bytes = audio_data[:20] if len(audio_data) >= 20 else audio_data
+        print(f"Audio header bytes: {' '.join([f'{b:02x}' for b in header_bytes])}")
         
         # Get the sender's language
         sender_language = self.get_language_preference(call_id, sender_id)
@@ -172,14 +181,24 @@ class ConnectionManager:
             
             # Get existing session ID for this user or None for a new session
             session_id = self.transcription_sessions.get(sender_id)
+            print(f"Using transcription session_id: {session_id} for user {sender_id}")
             
-            # Call transcribe_audio with session_id
-            result = await transcribe_audio(audio_data, sender_language, session_id)
-            
-            # Store the session ID for future use
-            if result and 'session_id' in result:
-                self.transcription_sessions[sender_id] = result['session_id']
-                print(f"Using transcription session {result['session_id']} for user {sender_id}")
+            try:
+                # Call transcribe_audio with correct parameter order (audio_data, session_id, language)
+                print(f"Calling transcribe_audio with {len(audio_data)} bytes...")
+                result = await transcribe_audio(audio_data, session_id, sender_language)
+                print(f"Transcription result: {result}")
+                
+                # Store the session ID for future use
+                if result and 'session_id' in result:
+                    self.transcription_sessions[sender_id] = result['session_id']
+                    print(f"Updated transcription session to {result['session_id']} for user {sender_id}")
+                else:
+                    print(f"WARNING: No session_id in transcription result: {result}")
+            except Exception as e:
+                print(f"ERROR during transcription: {e}")
+                print(traceback.format_exc())
+                return
             
             # Extract text from result dictionary
             text = result.get('text') if result else None

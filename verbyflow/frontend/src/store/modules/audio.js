@@ -12,7 +12,9 @@ export default {
     outputAudioLevel: 0,
     audioBufferSize: 4096,
     transcription: '',
-    isMuted: false
+    isMuted: false,
+    vadSensitivity: 2, // 1-5, higher = more sensitive to speech
+    pauseThreshold: 800  // ms of silence to consider a natural pause
   },
   
   getters: {
@@ -150,10 +152,33 @@ export default {
         }
         
         // Create a MediaRecorder with optimized audio settings for speech recognition
+        // Try multiple formats in order of preference for better compatibility with Whisper API
+        
+        // Determine the best supported format
+        const getMimeType = () => {
+          const types = [
+            'audio/ogg;codecs=opus',  // First choice - OGG container with Opus codec
+            'audio/webm;codecs=opus', // Second choice - WebM with Opus
+            'audio/wav',              // Third choice - WAV (if supported)
+            'audio/mp3'               // Fourth choice - MP3 (rarely supported in browsers)
+          ]
+          
+          for (const type of types) {
+            if (MediaRecorder.isTypeSupported(type)) {
+              console.log(`Using audio format: ${type}`)
+              return type
+            }
+          }
+          
+          // If none of our preferred types are supported, let the browser choose
+          console.warn('None of the preferred audio formats are supported')
+          return ''
+        }
+        
         const options = {
-          mimeType: 'audio/webm;codecs=opus',
+          mimeType: getMimeType(),
           audioBitsPerSecond: 16000,  // Optimized for voice
-          bitsPerSecond: 25000       // Low bitrate for faster transmission
+          bitsPerSecond: 25000        // Low bitrate for faster transmission
         }
         
         let mediaRecorder;
@@ -169,18 +194,17 @@ export default {
         // Store the recorder in state
         commit('SET_MEDIA_RECORDER', mediaRecorder)
         
-        // Setup recording behavior with voice activity detection
+        // Set up Audio Analyzer for speech detection
+        let audioBuffer = [];
         let speechDetected = false;
         let silenceCounter = 0;
-        // Increase threshold slightly for more stable speech detection
-        const VAD_THRESHOLD = 0.015;    // Adjusted based on testing
-        const SILENCE_LIMIT = 5;        // Increased to reduce fragmentation
-        
-        // Buffer to collect audio chunks before sending
-        const audioBuffer = [];
-        const MIN_BUFFER_SIZE = 2;      // Min number of chunks to collect before sending
-        const MAX_BUFFER_SIZE = 5;      // Max buffer size to prevent latency
         let bufferTimer = null;
+        
+        // Constants for speech detection - adjusted for better natural pause detection
+        const VAD_THRESHOLD = 0.05; // Base voice activity detection threshold (0-1)
+        const SILENCE_LIMIT = 20; // frames of silence before completely ending speech detection
+        const MIN_BUFFER_SIZE = 2; // Min number of chunks to collect before sending
+        const MAX_BUFFER_SIZE = 8; // Max buffer size to prevent latency (increased for better utterances)
         
         // Audio analyzer for VAD
         const analyserNode = state.audioContext.createAnalyser();
@@ -190,59 +214,90 @@ export default {
         const bufferLength = analyserNode.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         
-        // Function to detect speech based on audio energy
+        // Function to detect speech based on audio energy with enhanced natural pause detection
         const detectSpeech = () => {
-          analyserNode.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            sum += dataArray[i];
-          }
-          const average = sum / bufferLength / 255; // Normalize to 0-1
-          
-          // Update input level for UI
-          commit('SET_INPUT_AUDIO_LEVEL', average);
-          
-          // Speech detection logic with smoother transition
-          const isSpeaking = average > VAD_THRESHOLD;
-          
-          if (isSpeaking) {
-            speechDetected = true;
-            silenceCounter = 0;
-          } else if (speechDetected) {
-            silenceCounter++;
-            if (silenceCounter > SILENCE_LIMIT) {
-              speechDetected = false;
-              // When speech ends, flush buffer after a short delay
-              if (audioBuffer.length > 0) {
-                if (bufferTimer) clearTimeout(bufferTimer);
-                bufferTimer = setTimeout(() => sendBufferedAudio(), 300);
+          try {
+            // Get audio data
+            analyserNode.getByteTimeDomainData(dataArray);
+            
+            // Calculate energy in the signal
+            let energy = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              // Convert unsigned 8-bit to signed
+              const amplitude = ((dataArray[i] - 128) / 128);
+              energy += (amplitude * amplitude);
+            }
+            energy = energy / dataArray.length;
+            
+            // Dynamically adjust threshold based on sensitivity
+            // Higher sensitivity = lower threshold = more likely to detect speech
+            const dynamicThreshold = 0.01 / Math.max(1, state.vadSensitivity);
+            
+            // Detect speech when energy exceeds threshold
+            const speechDetected = energy > dynamicThreshold;
+            
+            // Track speech and silence to detect natural pauses
+            const currentTime = Date.now();
+            
+            if (speechDetected && !utteranceInProgress) {
+              // Speech started
+              utteranceInProgress = true;
+              lastSpeechTime = currentTime;
+              console.log('Speech detected - starting utterance');
+            } else if (speechDetected && utteranceInProgress) {
+              // Ongoing speech - update the time
+              lastSpeechTime = currentTime;
+            } else if (!speechDetected && utteranceInProgress) {
+              // Possible natural pause - check if silence duration exceeds threshold
+              const silenceDuration = currentTime - lastSpeechTime;
+              if (silenceDuration > state.pauseThreshold) {
+                // Natural pause detected
+                if (audioBuffer.length > 0) {
+                  console.log('Natural pause detected, sending buffered utterance');
+                  if (bufferTimer) clearTimeout(bufferTimer);
+                  sendBufferedAudio();
+                }
+                utteranceInProgress = false;
               }
             }
+            
+            return speechDetected;
+          } catch (error) {
+            console.error('Error in speech detection:', error);
+            return false;
           }
-          
-          return speechDetected;
-        };
+        }
         
-        // Function to send buffered audio chunks as a single blob
+        // Track utterance state
+        let utteranceInProgress = false;
+        let lastSpeechTime = 0;
+        
+        // Function to send buffered audio chunks as a single blob (complete utterance)
         const sendBufferedAudio = () => {
-          if (audioBuffer.length === 0) return;
-          
-          console.log(`Sending buffered audio: ${audioBuffer.length} chunks`);
-          
-          // Combine all blobs in buffer
-          const combinedBlob = new Blob(audioBuffer, { type: 'audio/webm;codecs=opus' });
-          
-          // Only send if we have enough audio data (to avoid "audio too short" errors)
-          if (combinedBlob.size > 1000) { // Ensure minimum viable size
-            if (state.websocketConnected && !state.isMuted) {
-              state.websocket.send(combinedBlob);
+          try {
+            if (audioBuffer.length === 0) return;
+            
+            console.log(`Sending complete utterance: ${audioBuffer.length} chunks`);
+            
+            // Combine all blobs in buffer - maintaining the WebM format with headers
+            const combinedBlob = new Blob(audioBuffer, { type: 'audio/webm;codecs=opus' });
+            
+            // Only send if we have enough audio data (to avoid "audio too short" errors)
+            if (combinedBlob.size > 1000) { // Ensure minimum viable size
+              if (state.websocketConnected && !state.isMuted) {
+                // Add telemetry to help with debugging
+                console.log(`Sending utterance of size: ${combinedBlob.size} bytes`);
+                state.websocket.send(combinedBlob);
+              }
+            } else {
+              console.log('Discarded audio buffer - too small');
             }
-          } else {
-            console.log('Discarded audio buffer - too small');
+            
+            // Clear the buffer for the next utterance
+            audioBuffer.length = 0;
+          } catch (error) {
+            console.error('Error sending buffered audio:', error);
           }
-          
-          // Clear the buffer
-          audioBuffer.length = 0;
         };
         
         // Start periodic analysis
@@ -250,23 +305,19 @@ export default {
         
         mediaRecorder.ondataavailable = async (event) => {
           if (event.data.size > 0 && !state.isMuted) {
+            // Always add the chunk to the buffer (we need the continuous audio)
+            audioBuffer.push(event.data);
+            console.log(`Audio chunk received: ${event.data.size} bytes`);
+            
+            // Check for speech in this chunk
             const hasSpeech = detectSpeech();
             
-            // Add to buffer when speech is detected
-            if (hasSpeech) {
-              console.log('Speech detected, buffering audio chunk');
-              audioBuffer.push(event.data);
-              
-              // If buffer is full, send it
-              if (audioBuffer.length >= MAX_BUFFER_SIZE) {
-                if (bufferTimer) clearTimeout(bufferTimer);
-                sendBufferedAudio();
-              } else if (audioBuffer.length === MIN_BUFFER_SIZE) {
-                // Start timer when we have minimum viable buffer
-                if (!bufferTimer) {
-                  bufferTimer = setTimeout(() => sendBufferedAudio(), 300);
-                }
-              }
+            // When not speaking and we have accumulated a lot of data, we should
+            // send what we have to prevent buffer from getting too large
+            if (!hasSpeech && audioBuffer.length >= MAX_BUFFER_SIZE) {
+              console.log('Buffer limit reached without active speech, sending accumulated audio');
+              if (bufferTimer) clearTimeout(bufferTimer);
+              sendBufferedAudio();
             }
           }
         };
@@ -284,8 +335,8 @@ export default {
         mediaRecorder.start(timeSlice)
         commit('SET_RECORDING_STATE', true)
       } catch (error) {
-        console.error('Error starting recording:', error)
-        throw error
+        console.error('Error starting recording:', error);
+        throw error;
       }
     },
     
@@ -296,7 +347,7 @@ export default {
       commit('SET_RECORDING_STATE', false)
     },
     
-    async setupWebSocket({ commit, state, rootGetters }, params = {}) {
+    async setupWebSocket({ commit, state, rootGetters, dispatch }, params = {}) {
       // Use params if provided, otherwise fallback to getters
       const callId = params.callId || rootGetters['call/currentCall']?.id
       const userId = params.userId || rootGetters['user/currentUser']?.id
@@ -320,14 +371,14 @@ export default {
       return new Promise((resolve, reject) => {
         const ws = new WebSocket(wsUrl)
         
+        // Store reference to dispatch for use in WebSocket handlers
+        // This ensures the WebSocket callbacks can access dispatch
+        const storeDispatch = dispatch;
+        
         ws.onopen = () => {
           commit('SET_WEBSOCKET', ws)
           commit('SET_WEBSOCKET_CONNECTED', true)
           resolve(ws)
-        }
-        
-        ws.onclose = () => {
-          commit('SET_WEBSOCKET_CONNECTED', false)
         }
         
         ws.onerror = (error) => {
@@ -336,6 +387,12 @@ export default {
           reject(error)
         }
         
+        ws.onclose = () => {
+          console.log('WebSocket disconnected')
+          commit('SET_WEBSOCKET_CONNECTED', false)
+        }
+        
+        // Handle incoming WebSocket messages
         ws.onmessage = (event) => {
           try {
             // Handle text messages (JSON)
@@ -349,7 +406,7 @@ export default {
                   
                 case 'translation':
                   // Handle translated text
-                  commit('call/ADD_MESSAGE', {
+                  storeDispatch('call/ADD_MESSAGE', {
                     id: Date.now(),
                     sender: message.sender_id,
                     originalText: message.original_text,
@@ -370,7 +427,7 @@ export default {
             } 
             // Handle binary messages (audio)
             else if (event.data instanceof Blob) {
-              dispatch('playReceivedAudio', event.data)
+              storeDispatch('playReceivedAudio', event.data)
             }
           } catch (error) {
             console.error('Error processing WebSocket message:', error)
@@ -424,7 +481,7 @@ export default {
     },
     
     cleanupAudio({ commit }) {
-      commit('CLEAR_AUDIO_STATE')
+      commit('CLEAR_AUDIO_STATE');
     }
   }
-}
+};

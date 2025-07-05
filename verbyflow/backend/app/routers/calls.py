@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 import uuid
 import json
 import asyncio
+import traceback
 
 from app.websockets.connection import ConnectionManager
 from app.models.schemas import CallSession, CallCreate
@@ -71,9 +72,22 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str, user_id: str):
                 
                 # Process received audio data
                 if data:
+                    print(f"Received audio data: {len(data)} bytes from user {user_id}")
+                    
+                    # Verify data format (check first few bytes for WebM header)
+                    if len(data) > 8:
+                        header_bytes = data[:8]
+                        header_hex = " ".join([f"{b:02x}" for b in header_bytes])
+                        print(f"Audio header: {header_hex}")
+                    
                     # Check if WebSocket is still connected before processing audio
                     if websocket.client_state == WebSocketState.CONNECTED:
-                        await manager.process_audio(data, call_id, user_id)
+                        try:
+                            await manager.process_audio(data, call_id, user_id)
+                            print(f"Audio processing completed for user {user_id}")
+                        except Exception as e:
+                            print(f"ERROR in audio processing: {e}")
+                            print(traceback.format_exc())
                     else:
                         print(f"Cannot process audio: WebSocket for user {user_id} is not in CONNECTED state (state: {websocket.client_state})")
                         break  # Exit the loop if websocket is not connected
