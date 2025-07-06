@@ -1,150 +1,182 @@
-import axios from 'axios'
-import { v4 as uuidv4 } from 'uuid'
-
-const API_URL = 'http://localhost:8000/api'
-
-// Load user from local storage if available
-const loadStoredUser = () => {
-  try {
-    const storedUser = localStorage.getItem('verbyflow_user')
-    return storedUser ? JSON.parse(storedUser) : null
-  } catch (error) {
-    console.error('Failed to load user from localStorage:', error)
-    return null
-  }
-}
-
-export default {
+const user = {
   namespaced: true,
   
   state: {
-    currentUser: loadStoredUser(),
-    availableLanguages: {},
-    loading: false,
-    error: null
+    userId: null,
+    displayName: null,
+    avatar: null,
+    preferences: {
+      language: 'en',
+      voicePreference: null,
+      darkMode: false,
+      notifications: true
+    },
+    availableLanguages: [
+      { code: 'en', name: 'English' },
+      { code: 'es', name: 'Spanish' },
+      { code: 'fr', name: 'French' },
+      { code: 'de', name: 'German' },
+      { code: 'it', name: 'Italian' },
+      { code: 'ja', name: 'Japanese' },
+      { code: 'ko', name: 'Korean' },
+      { code: 'zh', name: 'Chinese' },
+      { code: 'ru', name: 'Russian' },
+      { code: 'pt', name: 'Portuguese' }
+    ]
   },
   
   getters: {
-    currentUser: state => state.currentUser,
-    userLanguage: state => state.currentUser?.preferred_language || 'en',
-    availableLanguages: state => state.availableLanguages,
-    isAuthenticated: state => !!state.currentUser,
-    loading: state => state.loading,
-    error: state => state.error
+    getUserId: state => state.userId,
+    getDisplayName: state => state.displayName,
+    getAvatar: state => state.avatar,
+    getPreferredLanguage: state => state.preferences.language,
+    getVoicePreference: state => state.preferences.voicePreference,
+    isDarkMode: state => state.preferences.darkMode,
+    getNotificationSetting: state => state.preferences.notifications,
+    getAvailableLanguages: state => state.availableLanguages
   },
   
   mutations: {
-    SET_CURRENT_USER(state, user) {
-      state.currentUser = user
-      // Save to localStorage
-      if (user) {
-        localStorage.setItem('verbyflow_user', JSON.stringify(user))
-      } else {
-        localStorage.removeItem('verbyflow_user')
-      }
+    SET_USER_ID(state, userId) {
+      state.userId = userId;
     },
-    
-    UPDATE_USER_LANGUAGE(state, language) {
-      if (state.currentUser) {
-        state.currentUser.preferred_language = language
-        localStorage.setItem('verbyflow_user', JSON.stringify(state.currentUser))
-      }
+    SET_DISPLAY_NAME(state, name) {
+      state.displayName = name;
     },
-    
-    SET_AVAILABLE_LANGUAGES(state, languages) {
-      state.availableLanguages = languages
+    SET_AVATAR(state, avatarUrl) {
+      state.avatar = avatarUrl;
     },
-    
-    SET_LOADING(state, loading) {
-      state.loading = loading
+    SET_LANGUAGE_PREFERENCE(state, language) {
+      state.preferences.language = language;
     },
-    
-    SET_ERROR(state, error) {
-      state.error = error
+    SET_VOICE_PREFERENCE(state, voice) {
+      state.preferences.voicePreference = voice;
+    },
+    SET_DARK_MODE(state, enabled) {
+      state.preferences.darkMode = enabled;
+    },
+    SET_NOTIFICATION_SETTING(state, enabled) {
+      state.preferences.notifications = enabled;
+    },
+    SET_USER_PREFERENCES(state, preferences) {
+      state.preferences = {
+        ...state.preferences,
+        ...preferences
+      };
     }
   },
   
   actions: {
-    async fetchAvailableLanguages({ commit }) {
+    // Initialize user session
+    initializeUser({ commit, dispatch }) {
+      // Try to load user from localStorage
       try {
-        commit('SET_LOADING', true)
-        const response = await axios.get(`${API_URL}/languages`)
-        commit('SET_AVAILABLE_LANGUAGES', response.data.languages)
-      } catch (error) {
-        commit('SET_ERROR', error.message || 'Failed to fetch languages')
-      } finally {
-        commit('SET_LOADING', false)
-      }
-    },
-    
-    async createUser({ commit }, { name, preferredLanguage }) {
-      try {
-        commit('SET_LOADING', true)
-        
-        const userData = {
-          id: uuidv4(),
-          name,
-          preferred_language: preferredLanguage
-        }
-        
-        const response = await axios.post(`${API_URL}/users/`, userData)
-        commit('SET_CURRENT_USER', response.data)
-        return response.data
-      } catch (error) {
-        commit('SET_ERROR', error.message || 'Failed to create user')
-        throw error
-      } finally {
-        commit('SET_LOADING', false)
-      }
-    },
-    
-    async updateUserLanguage({ commit, state, dispatch }, language) {
-      try {
-        if (!state.currentUser) {
-          throw new Error('No user logged in')
-        }
-        
-        commit('SET_LOADING', true)
-        
-        try {
-          // Try to update the user in the backend
-          const response = await axios.put(`${API_URL}/users/${state.currentUser.id}`, {
-            preferred_language: language
-          })
+        const savedUser = localStorage.getItem('verbyflow_user');
+        if (savedUser) {
+          const userData = JSON.parse(savedUser);
           
-          // Update locally
-          commit('UPDATE_USER_LANGUAGE', language)
-          return response.data
-        } catch (error) {
-          // If user not found (404), create the user first, then update
-          if (error.response && error.response.status === 404) {
-            console.log('User not found in backend, creating user first...')
-            const userData = {
-              id: state.currentUser.id,
-              name: state.currentUser.name,
-              preferred_language: language
-            }
-            
-            // Create the user
-            await axios.post(`${API_URL}/users/`, userData)
-            
-            // Update locally
-            commit('UPDATE_USER_LANGUAGE', language)
-            return state.currentUser
+          if (userData.userId) {
+            commit('SET_USER_ID', userData.userId);
           }
-          // Re-throw other errors
-          throw error
+          
+          if (userData.displayName) {
+            commit('SET_DISPLAY_NAME', userData.displayName);
+          }
+          
+          if (userData.preferences) {
+            commit('SET_USER_PREFERENCES', userData.preferences);
+          }
+          
+          console.log('[TRACE] Loaded user from local storage:', userData);
+          return userData;
         }
       } catch (error) {
-        commit('SET_ERROR', error.message || 'Failed to update language')
-        throw error
-      } finally {
-        commit('SET_LOADING', false)
+        console.error('[ERROR] Failed to load user data from localStorage:', error);
       }
+      
+      // Create new anonymous user if none exists
+      return dispatch('createAnonymousUser');
     },
     
-    logout({ commit }) {
-      commit('SET_CURRENT_USER', null)
+    // Create anonymous user
+    createAnonymousUser({ commit, state }) {
+      const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const displayName = `Guest_${Math.floor(Math.random() * 10000)}`;
+      
+      commit('SET_USER_ID', userId);
+      commit('SET_DISPLAY_NAME', displayName);
+      
+      const userData = {
+        userId,
+        displayName,
+        preferences: state.preferences
+      };
+      
+      // Save to localStorage
+      localStorage.setItem('verbyflow_user', JSON.stringify(userData));
+      
+      console.log('[TRACE] Created anonymous user:', userData);
+      return userData;
+    },
+    
+    // Update user profile
+    updateUserProfile({ commit, state }, { displayName }) {
+      commit('SET_DISPLAY_NAME', displayName);
+      
+      // Update localStorage
+      const userData = {
+        userId: state.userId,
+        displayName,
+        preferences: state.preferences
+      };
+      
+      localStorage.setItem('verbyflow_user', JSON.stringify(userData));
+      
+      return userData;
+    },
+    
+    // Update language preference
+    updateLanguagePreference({ commit, state }, language) {
+      commit('SET_LANGUAGE_PREFERENCE', language);
+      
+      // Update localStorage
+      const userData = {
+        userId: state.userId,
+        displayName: state.displayName,
+        preferences: {
+          ...state.preferences,
+          language
+        }
+      };
+      
+      localStorage.setItem('verbyflow_user', JSON.stringify(userData));
+    },
+    
+    // Toggle dark mode
+    toggleDarkMode({ commit, state }) {
+      const newDarkMode = !state.preferences.darkMode;
+      commit('SET_DARK_MODE', newDarkMode);
+      
+      // Apply dark mode to HTML element
+      if (newDarkMode) {
+        document.documentElement.classList.add('dark-mode');
+      } else {
+        document.documentElement.classList.remove('dark-mode');
+      }
+      
+      // Update localStorage
+      const userData = {
+        userId: state.userId,
+        displayName: state.displayName,
+        preferences: {
+          ...state.preferences,
+          darkMode: newDarkMode
+        }
+      };
+      
+      localStorage.setItem('verbyflow_user', JSON.stringify(userData));
     }
   }
-}
+};
+
+export default user;

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
+
+// View components
 import Home from '../views/Home.vue'
-import Call from '../views/Call.vue'
 
 const routes = [
   {
@@ -11,12 +12,12 @@ const routes = [
   {
     path: '/call',
     name: 'Call',
-    component: Call
+    component: () => import(/* webpackChunkName: "call" */ '../views/Call.vue')
   },
   {
     path: '/call/:id',
     name: 'JoinCall',
-    component: Call
+    component: () => import(/* webpackChunkName: "call" */ '../views/Call.vue')
   }
 ]
 

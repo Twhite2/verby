@@ -1,5 +1,0 @@
-#!C:\Users\Jarvis\Documents\verby\verbyflow\backend\verby\Scripts\python.exe
-
-from argostranslate import argospm
-
-argospm.main()

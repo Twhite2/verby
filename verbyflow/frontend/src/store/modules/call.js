@@ -1,124 +1,221 @@
-import axios from 'axios'
+import axios from 'axios';
 
-const API_URL = 'http://localhost:8000/api'
-
-export default {
+const call = {
   namespaced: true,
   
   state: {
-    currentCall: null,
-    isInCall: false,
+    activeCall: null,
+    callId: null,
+    callStatus: null, // 'connecting', 'connected', 'disconnected', 'error'
     participants: [],
     messages: [],
-    loading: false,
-    error: null
+    activeLanguage: 'en', // Default to English
   },
   
   getters: {
-    currentCall: state => state.currentCall,
-    isInCall: state => state.isInCall,
-    participants: state => state.participants,
-    messages: state => state.messages,
-    loading: state => state.loading,
-    error: state => state.error
+    isInCall: state => !!state.callId,
+    getCallId: state => state.callId,
+    getCallStatus: state => state.callStatus,
+    getParticipants: state => state.participants,
+    getMessages: state => state.messages,
+    getActiveLanguage: state => state.activeLanguage,
+    getActiveCall: state => state.activeCall
   },
   
   mutations: {
-    SET_CURRENT_CALL(state, call) {
-      state.currentCall = call
-      state.isInCall = !!call
+    SET_CALL_ID(state, callId) {
+      state.callId = callId;
     },
-    
-    SET_PARTICIPANTS(state, participants) {
-      state.participants = participants
+    SET_CALL_STATUS(state, status) {
+      state.callStatus = status;
     },
-    
+    SET_ACTIVE_CALL(state, callData) {
+      state.activeCall = callData;
+    },
     ADD_PARTICIPANT(state, participant) {
-      if (!state.participants.find(p => p.id === participant.id)) {
-        state.participants.push(participant)
+      const existingIndex = state.participants.findIndex(p => p.id === participant.id);
+      if (existingIndex >= 0) {
+        // Update existing participant
+        state.participants.splice(existingIndex, 1, {
+          ...state.participants[existingIndex],
+          ...participant
+        });
+      } else {
+        // Add new participant
+        state.participants.push(participant);
       }
     },
-    
     REMOVE_PARTICIPANT(state, participantId) {
-      state.participants = state.participants.filter(p => p.id !== participantId)
+      state.participants = state.participants.filter(p => p.id !== participantId);
     },
-    
+    UPDATE_PARTICIPANT(state, { participantId, updates }) {
+      const index = state.participants.findIndex(p => p.id === participantId);
+      if (index !== -1) {
+        state.participants[index] = {
+          ...state.participants[index],
+          ...updates
+        };
+      }
+    },
     ADD_MESSAGE(state, message) {
-      state.messages.push(message)
+      state.messages.push(message);
+      
+      // Limit message history to 100 items
+      if (state.messages.length > 100) {
+        state.messages.shift();
+      }
     },
-    
-    SET_LOADING(state, loading) {
-      state.loading = loading
+    CLEAR_MESSAGES(state) {
+      state.messages = [];
     },
-    
-    SET_ERROR(state, error) {
-      state.error = error
+    SET_ACTIVE_LANGUAGE(state, language) {
+      state.activeLanguage = language;
     },
-    
-    CLEAR_CALL_STATE(state) {
-      state.currentCall = null
-      state.isInCall = false
-      state.participants = []
-      state.messages = []
-      state.error = null
+    RESET_CALL_STATE(state) {
+      state.callId = null;
+      state.callStatus = null;
+      state.participants = [];
+      state.messages = [];
+      state.activeCall = null;
     }
   },
   
   actions: {
-    async createCall({ commit, rootState }) {
+    // Create a new call
+    async createCall({ commit, dispatch, rootState }) {
       try {
-        commit('SET_LOADING', true)
+        commit('SET_CALL_STATUS', 'connecting');
         
-        const userId = rootState.user.currentUser?.id
-        if (!userId) {
-          throw new Error('User not authenticated')
-        }
+        // Get user ID from state or generate a temporary one
+        const userId = rootState.user?.id || `user_${Date.now()}`;
+        const userName = rootState.user?.name || 'Anonymous';
         
-        const response = await axios.post(`${API_URL}/calls/`, { creator_id: userId })
-        commit('SET_CURRENT_CALL', response.data)
-        return response.data
+        // Include creator_id in the request body
+        const response = await axios.post('/api/calls', {
+          creator_id: userId
+        });
+        const callData = response.data;
+        
+        console.log('[TRACE] Call created:', callData);
+        
+        commit('SET_CALL_ID', callData.id);
+        commit('SET_ACTIVE_CALL', callData);
+        
+        // Add self as participant
+        
+        const selfParticipant = {
+          id: userId,
+          name: userName,
+          isLocal: true,
+          isSpeaking: false,
+          language: rootState.call?.activeLanguage || 'en'
+        };
+        
+        commit('ADD_PARTICIPANT', selfParticipant);
+        
+        // Setup WebSocket for real-time communication
+        await dispatch('audio/setupWebSocket', {
+          callId: callData.id,
+          userId
+        }, { root: true });
+        
+        commit('SET_CALL_STATUS', 'connected');
+        return callData;
       } catch (error) {
-        commit('SET_ERROR', error.message || 'Failed to create call')
-        throw error
-      } finally {
-        commit('SET_LOADING', false)
+        console.error('[ERROR] Failed to create call:', error);
+        commit('SET_CALL_STATUS', 'error');
+        dispatch('showError', 'Failed to create call', { root: true });
+        throw error;
       }
     },
     
-    async joinCall({ commit, rootState }, callId) {
+    // Join an existing call
+    async joinCall({ commit, dispatch, rootState }, callId) {
       try {
-        commit('SET_LOADING', true)
+        commit('SET_CALL_STATUS', 'connecting');
         
-        const userId = rootState.user.currentUser?.id
-        if (!userId) {
-          throw new Error('User not authenticated')
-        }
+        // Verify call exists and is active
+        const response = await axios.get(`/api/calls/${callId}`);
+        const callData = response.data;
         
-        const response = await axios.get(`${API_URL}/calls/${callId}`)
-        commit('SET_CURRENT_CALL', response.data)
-        return response.data
+        console.log('[TRACE] Joining call:', callData);
+        
+        commit('SET_CALL_ID', callData.id);
+        commit('SET_ACTIVE_CALL', callData);
+        
+        // Add self as participant
+        const userId = rootState.user?.id || `user_${Date.now()}`;
+        const userName = rootState.user?.name || 'Anonymous';
+        
+        const selfParticipant = {
+          id: userId,
+          name: userName,
+          isLocal: true,
+          isSpeaking: false,
+          language: rootState.call?.activeLanguage || 'en'
+        };
+        
+        commit('ADD_PARTICIPANT', selfParticipant);
+        
+        // Setup WebSocket for real-time communication
+        await dispatch('audio/setupWebSocket', {
+          callId: callData.id,
+          userId
+        }, { root: true });
+        
+        commit('SET_CALL_STATUS', 'connected');
+        return callData;
       } catch (error) {
-        commit('SET_ERROR', error.message || 'Failed to join call')
-        throw error
-      } finally {
-        commit('SET_LOADING', false)
+        console.error('[ERROR] Failed to join call:', error);
+        commit('SET_CALL_STATUS', 'error');
+        dispatch('showError', `Failed to join call: ${error.message}`, { root: true });
+        throw error;
       }
     },
     
+    // Leave the current call
+    async leaveCall({ commit, dispatch, state }) {
+      try {
+        if (!state.callId) {
+          return;
+        }
+        
+        console.log('[TRACE] Leaving call');
+        
+        // Cleanup audio resources
+        await dispatch('audio/cleanupAudio', null, { root: true });
+        
+        commit('RESET_CALL_STATE');
+        return true;
+      } catch (error) {
+        console.error('[ERROR] Error leaving call:', error);
+        throw error;
+      }
+    },
+    
+    // Add a chat/transcription message
     addMessage({ commit }, message) {
-      commit('ADD_MESSAGE', message)
+      // Ensure message has required properties
+      const completeMessage = {
+        id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        timestamp: new Date().toISOString(),
+        ...message
+      };
+      
+      commit('ADD_MESSAGE', completeMessage);
     },
     
-    addParticipant({ commit }, participant) {
-      commit('ADD_PARTICIPANT', participant)
+    // Change active language
+    changeLanguage({ commit }, language) {
+      console.log(`[TRACE] Changing language to ${language}`);
+      commit('SET_ACTIVE_LANGUAGE', language);
     },
     
-    removeParticipant({ commit }, participantId) {
-      commit('REMOVE_PARTICIPANT', participantId)
-    },
-    
-    leaveCall({ commit }) {
-      commit('CLEAR_CALL_STATE')
+    // Update participant status (e.g. speaking state)
+    updateParticipant({ commit }, { participantId, updates }) {
+      commit('UPDATE_PARTICIPANT', { participantId, updates });
     }
   }
-}
+};
+
+export default call;

@@ -1,54 +1,47 @@
 <template>
-  <div id="app">
-    <header class="app-header">
+  <div class="app-container">
+    <header>
       <div class="logo">
         <h1>VerbyFlow</h1>
       </div>
-      <nav class="main-nav">
+      <nav>
         <router-link to="/">Home</router-link>
         <router-link to="/call">Start Call</router-link>
       </nav>
     </header>
-
-    <main class="app-content">
-      <router-view/>
+    <main>
+      <router-view />
     </main>
-
-    <footer class="app-footer">
-      <p>&copy; {{ currentYear }} VerbyFlow - Real-Time Multilingual Voice Communication</p>
-    </footer>
-    
-    <!-- Notifications component for displaying alerts -->
-    <Notifications />
+    <AppNotification />
   </div>
 </template>
 
 <script>
-import Notifications from './components/Notifications.vue'
+import AppNotification from './components/Notification.vue';
 
 export default {
   name: 'App',
   components: {
-    Notifications
+    AppNotification
   },
-  computed: {
-    currentYear() {
-      return new Date().getFullYear();
-    }
+  mounted() {
+    // Initialize app on mount
+    this.$store.dispatch('initializeApp');
+    this.$store.dispatch('user/initializeUser');
   }
 }
 </script>
 
 <style>
 :root {
-  --primary-color: #4a6fa5;
-  --secondary-color: #166e7a;
-  --accent-color: #2dd18c;
-  --dark-color: #333333;
-  --light-color: #f5f5f5;
-  --success-color: #28a745;
-  --warning-color: #ffc107;
-  --error-color: #dc3545;
+  --primary-color: #3498db;
+  --secondary-color: #2980b9;
+  --accent-color: #2ecc71;
+  --error-color: #e74c3c;
+  --text-color: #333;
+  --bg-color: #f5f7fa;
+  --light-bg: #ffffff;
+  --border-color: #e1e4e8;
 }
 
 * {
@@ -57,116 +50,105 @@ export default {
   padding: 0;
 }
 
-body {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  line-height: 1.6;
-  color: var(--dark-color);
-  background-color: var(--light-color);
+html, body {
+  font-family: 'Roboto', sans-serif;
+  font-size: 16px;
+  color: var(--text-color);
+  background-color: var(--bg-color);
+  height: 100%;
 }
 
 #app {
+  height: 100vh;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
 }
 
-.app-header {
-  background-color: var(--primary-color);
-  color: white;
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+header {
+  background-color: var(--light-bg);
   padding: 1rem 2rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .logo h1 {
+  color: var(--primary-color);
   font-size: 1.8rem;
-  margin: 0;
 }
 
-.main-nav {
+nav {
   display: flex;
   gap: 1.5rem;
 }
 
-.main-nav a {
-  color: white;
+nav a {
+  color: var(--text-color);
   text-decoration: none;
   font-weight: 500;
-  padding: 0.5rem 0;
-  position: relative;
+  padding: 0.5rem 0.8rem;
+  border-radius: 4px;
 }
 
-.main-nav a::after {
-  content: '';
-  position: absolute;
-  width: 0;
-  height: 2px;
-  bottom: 0;
-  left: 0;
-  background-color: var(--accent-color);
-  transition: width 0.3s ease;
+nav a:hover, nav a.router-link-active {
+  color: var(--primary-color);
+  background-color: rgba(52, 152, 219, 0.1);
 }
 
-.main-nav a:hover::after, .main-nav a.router-link-active::after {
-  width: 100%;
-}
-
-.app-content {
+main {
   flex: 1;
-  padding: 2rem;
-  max-width: 1200px;
-  margin: 0 auto;
-  width: 100%;
+  overflow: auto;
+  padding: 1rem;
 }
 
-.app-footer {
+button, .btn {
+  border: none;
+  padding: 0.8rem 1.5rem;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.btn-primary {
   background-color: var(--primary-color);
   color: white;
-  text-align: center;
-  padding: 1rem;
-  margin-top: auto;
 }
 
-button {
-  background-color: var(--accent-color);
+.btn-primary:hover {
+  background-color: var(--secondary-color);
+}
+
+.btn-secondary {
+  background-color: #ecf0f1;
+  color: var(--text-color);
+}
+
+.btn-secondary:hover {
+  background-color: #bdc3c7;
+}
+
+.btn-danger {
+  background-color: var(--error-color);
   color: white;
-  border: none;
-  padding: 0.5rem 1.5rem;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 500;
-  transition: background-color 0.3s ease;
 }
 
-button:hover {
-  background-color: #25b478;
-}
-
-button:disabled {
-  background-color: #cccccc;
-  cursor: not-allowed;
+.btn-danger:hover {
+  background-color: #c0392b;
 }
 
 .card {
-  background-color: white;
+  background-color: var(--light-bg);
   border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
   padding: 1.5rem;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-}
-
-@media (max-width: 768px) {
-  .app-header {
-    flex-direction: column;
-    padding: 1rem;
-  }
-  
-  .main-nav {
-    margin-top: 1rem;
-  }
-  
-  .app-content {
-    padding: 1rem;
-  }
 }
 </style>
