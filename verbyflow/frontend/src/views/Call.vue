@@ -1,8 +1,9 @@
 <template>
   <div class="call-container">
-    <div v-if="callStatus !== 'connected'" class="connecting-overlay">
+    <div v-if="callStatus !== 'connected' || !callId" class="connecting-overlay">
       <div class="spinner"></div>
       <p>{{ callStatus === 'connecting' ? 'Connecting to call...' : 'Connection error' }}</p>
+      <p v-if="initError" class="error-message">{{ initError }}</p>
       <button v-if="callStatus === 'error'" @click="handleRetryConnection" class="btn btn-primary">Retry</button>
     </div>
     
@@ -133,6 +134,8 @@ export default {
   data() {
     return {
       selectedLanguage: 'en',
+      initError: null,
+      initAttempts: 0,
       retryCount: 0,
       maxRetries: 3
     }
@@ -178,22 +181,42 @@ export default {
   methods: {
     async initializeCall() {
       try {
+        this.initError = null;
+        this.initAttempts++;
+        console.log(`[TRACE] Initializing call - attempt ${this.initAttempts}`);
+        
         // Initialize user if not already done
         await this.$store.dispatch('user/initializeUser');
+        console.log(`[TRACE] User initialized with ID: ${this.$store.getters['user/getUserId']}`);
         
         // Join or create call
         if (this.routeCallId) {
+          console.log(`[TRACE] Joining existing call with ID: ${this.routeCallId}`);
           await this.$store.dispatch('call/joinCall', this.routeCallId);
+          console.log(`[TRACE] Successfully joined call ${this.routeCallId}`);
         } else {
+          console.log(`[TRACE] Creating new call`);
           const callData = await this.$store.dispatch('call/createCall');
+          console.log(`[TRACE] Created call with ID: ${callData.id}`);
           // Update URL with the new call ID
           this.$router.replace(`/call/${callData.id}`);
         }
         
+        // Verify we have a valid call ID after joining/creating
+        const currentCallId = this.$store.getters['call/getCallId'];
+        if (!currentCallId) {
+          throw new Error('Failed to get valid call ID after joining/creating call');
+        }
+        
+        console.log(`[TRACE] Current call ID after join/create: ${currentCallId}`);
+        
         // Initialize audio components
         await this.$store.dispatch('audio/initializeAudio');
+        console.log(`[TRACE] Audio components initialized`);
       } catch (error) {
+        this.initError = `Error: ${error.message || 'Unknown error during call initialization'}`;
         console.error('Failed to initialize call:', error);
+        this.$store.commit('call/SET_CALL_STATUS', 'error');
       }
     },
     

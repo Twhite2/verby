@@ -130,9 +130,20 @@ const call = {
     },
     
     // Join an existing call
-    async joinCall({ commit, dispatch, rootState }, callId) {
+    async joinCall({ commit, dispatch, rootState }, callIdOrUrl) {
       try {
         commit('SET_CALL_STATUS', 'connecting');
+        
+        // Extract callId from URL if a full URL was passed
+        let callId = callIdOrUrl;
+        
+        // Check if it's a URL and extract just the ID portion
+        if (callIdOrUrl.includes('/')) {
+          // Extract the UUID portion from the URL
+          const parts = callIdOrUrl.split('/');
+          callId = parts[parts.length - 1]; // Get the last segment which should be the UUID
+          console.log(`[TRACE] Extracted call ID ${callId} from URL ${callIdOrUrl}`);
+        }
         
         // Verify call exists and is active
         const response = await axios.get(`/api/calls/${callId}`);

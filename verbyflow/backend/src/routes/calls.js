@@ -17,45 +17,61 @@ router.get('/', (req, res) => {
 
 // GET /api/calls/:callId - Get call by ID
 router.get('/:callId', (req, res) => {
-  const callId = req.params.callId;
-  
-  if (calls.has(callId)) {
-    logger.debug(`Fetching call: ${callId}`);
-    res.status(200).json(calls.get(callId));
-  } else {
-    logger.warn(`Call not found: ${callId}`);
-    res.status(404).json({ error: 'Call not found' });
+  try {
+    const callId = req.params.callId;
+    
+    if (!callId) {
+      logger.warn('Attempted to fetch call without a valid ID');
+      return res.status(400).json({ error: 'Invalid call ID' });
+    }
+    
+    if (calls.has(callId)) {
+      logger.debug(`Fetching call: ${callId}`);
+      return res.status(200).json(calls.get(callId));
+    } else {
+      logger.warn(`Call not found: ${callId}`);
+      return res.status(404).json({ error: 'Call not found' });
+    }
+  } catch (error) {
+    logger.error(`Error retrieving call: ${error.message}`, { error });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // POST /api/calls - Create a new call
 router.post('/', (req, res) => {
-  // Generate a new unique call ID
-  const callId = uuidv4();
-  
-  // Extract creator ID from request body
-  const { creator_id } = req.body;
-  
-  if (!creator_id) {
-    logger.warn('Attempted to create call without creator_id');
-    return res.status(400).json({ error: 'Missing creator_id' });
+  try {
+    // Generate a new unique call ID
+    const callId = uuidv4();
+    
+    // Extract creator ID from request body
+    const { creator_id } = req.body;
+    
+    // Validate required fields
+    if (!creator_id) {
+      logger.warn('Attempted to create call without creator_id');
+      return res.status(400).json({ error: 'Missing creator_id' });
+    }
+    
+    // Create call object
+    const call = {
+      id: callId,
+      creator_id,
+      participants: [creator_id], // Creator is the first participant
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      active: true
+    };
+    
+    // Store call in memory
+    calls.set(callId, call);
+    
+    logger.info(`Created new call: ${callId} by user ${creator_id}`);
+    return res.status(201).json(call);
+  } catch (error) {
+    logger.error(`Error creating call: ${error.message}`, { error });
+    return res.status(500).json({ error: 'Internal server error' });
   }
-  
-  // Create call object
-  const call = {
-    id: callId,
-    creator_id,
-    participants: [creator_id], // Creator is the first participant
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    active: true
-  };
-  
-  // Store call in memory
-  calls.set(callId, call);
-  
-  logger.info(`Created new call: ${callId} by user ${creator_id}`);
-  res.status(201).json(call);
 });
 
 // PUT /api/calls/:callId - Update a call
